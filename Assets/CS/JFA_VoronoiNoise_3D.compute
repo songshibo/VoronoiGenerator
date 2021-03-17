@@ -1,0 +1,88 @@
+﻿#pragma kernel Clear
+#pragma kernel InitSeeds
+#pragma kernel JFA
+#pragma kernel GlobalMinMax
+#pragma kernel Normalize
+#define numThread 8
+#define distanceExpansion 1e8
+
+#include "Util.cginc"
+
+RWTexture3D<float4> pixels;
+StructuredBuffer<float3> seeds;
+RWStructuredBuffer<int> minMax;
+int numSeeds;
+int resolution;
+int offset;
+int step;
+float4 channelMask;
+bool invert;
+
+[numthreads(numThread, numThread, numThread)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+	pixels[id] = float4(0,0,0,-1);
+}
+
+[numthreads(512, 1, 1)]
+void InitSeeds(uint3 id : SV_DispatchThreadID)
+{
+	if ((int)id.x < numSeeds)
+	{
+		int3 index = (int3)(seeds[id.x] * resolution);
+		for (int i = 0; i < 27; i++)
+		{
+			int3 offIndex = index + offset3d[i];
+			if (IsIndexInRange3D(offIndex, resolution))
+			{
+				pixels[offIndex] = float4(0, 0, 0, id.x);
+			}
+		}
+	}
+}
+
+[numthreads(numThread, numThread, numThread)]
+void JFA(uint3 id : SV_DispatchThreadID)
+{
+	// ! Without this, out-range indices will write the pixel at clamped position
+	if (IsIndexInRange3D(id, resolution))
+	{
+		float min_dist = 1e10;
+		int min_index = -1;
+		for (int i = 0; i < 27; i++)
+		{
+			int3 idx = id + offset3d[i] * step;
+			if (IsIndexInRange3D(idx, resolution) && !(pixels[idx].w < 0.0))
+			{
+				float dist = distance(id / (float)resolution, seeds[(int)pixels[idx].w]);
+				if(dist < min_dist)
+				{
+					min_dist = dist;
+					min_index = (int)pixels[idx].w;
+				}
+			}
+		}
+		pixels[id] = float4(min_dist, min_dist, min_dist, min_index);
+	}
+}
+
+[numthreads(numThread, numThread, numThread)]
+void GlobalMinMax(uint3 id : SV_DispatchThreadID)
+{
+	int expandedDist = (int)(pixels[id].r * distanceExpansion);
+	InterlockedMin(minMax[0], expandedDist);
+	InterlockedMax(minMax[1], expandedDist);
+}
+
+[numthreads(numThread, numThread, numThread)]
+void Normalize(uint3 id : SV_DispatchThreadID)
+{
+	float minDist = (float)minMax[0] / distanceExpansion;
+	float maxDist = (float)minMax[1] / distanceExpansion;
+	float nDist = (pixels[id].r - minDist) / (maxDist - minDist);
+	if(invert)
+	{
+		nDist = 1- nDist;
+	}
+	pixels[id] = float4(nDist, nDist, nDist, 1.0);
+}

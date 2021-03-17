@@ -1,0 +1,90 @@
+﻿#pragma kernel Clear
+#pragma kernel InitSeeds
+#pragma kernel JFA
+#pragma kernel GlobalMinMax
+#pragma kernel Normalize
+#define numThread 32
+#define distanceExpansion 1e8
+
+#include "Util.cginc"
+
+RWTexture2D<float4> pixels;
+StructuredBuffer<float2> seeds;
+RWStructuredBuffer<int> minMax;
+int numSeeds;
+int resolution;
+// int offset;
+int step;
+float4 channelMask;
+bool invert;
+
+[numthreads(numThread, numThread, 1)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+	pixels[id.xy] = float4(0,0,0,-1);
+}
+
+[numthreads(512, 1, 1)]
+void InitSeeds(uint3 id : SV_DispatchThreadID)
+{
+	if ((int)id.x < numSeeds)
+	{
+		int2 index = (int2)(seeds[id.x] * resolution);
+		pixels[index] = float4(1, 1, 1, id.x);
+		// for (int i = 0; i < 9; i++)
+		// {
+			// 	int2 offIndex = index + offset2d[i];
+			// 	if (IsIndexInRange2D(offIndex, resolution))
+			// 	{
+				// 		float gray = (float)id.x / numSeeds;
+				// 		pixels[offIndex] = float4(gray, gray, gray, id.x);
+			// 	}
+		// }
+	}
+}
+
+[numthreads(numThread, numThread, 1)]
+void JFA(uint3 id : SV_DispatchThreadID)
+{
+	// ! Without this, out-range indices will write the pixel at clamped position
+	if (IsIndexInRange2D(id.xy, resolution))
+	{
+		float min_dist = 1e10;
+		int min_index = -1;
+		for (int i = 0; i < 9; i++)
+		{
+			int2 idx = id.xy + offset2d[i] * step;
+			if (IsIndexInRange2D(idx, resolution) && !(pixels[idx].w < 0.0))
+			{
+				float dist = distance(id.xy / (float)resolution, seeds[(int)pixels[idx].w]);
+				if(dist < min_dist)
+				{
+					min_dist = dist;
+					min_index = (int)pixels[idx].w;
+				}
+			}
+		}
+		pixels[id.xy] = float4(min_dist, min_dist, min_dist, min_index);
+	}
+}
+
+[numthreads(numThread, numThread, 1)]
+void GlobalMinMax(uint3 id : SV_DispatchThreadID)
+{
+	int expandedDist = (int)(pixels[id.xy].r * distanceExpansion);
+	InterlockedMin(minMax[0], expandedDist);
+	InterlockedMax(minMax[1], expandedDist);
+}
+
+[numthreads(numThread, numThread, 1)]
+void Normalize(uint3 id : SV_DispatchThreadID)
+{
+	float minDist = (float)minMax[0] / distanceExpansion;
+	float maxDist = (float)minMax[1] / distanceExpansion;
+	float nDist = (pixels[id.xy].r - minDist) / (maxDist - minDist);
+	if(invert)
+	{
+		nDist = 1- nDist;
+	}
+	pixels[id.xy] = float4(nDist, nDist, nDist, 1.0);
+}

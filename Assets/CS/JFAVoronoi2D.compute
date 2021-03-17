@@ -1,0 +1,127 @@
+﻿#pragma kernel Clear
+#pragma kernel InitSeeds
+#pragma kernel JFA
+#pragma kernel RenderDistance
+#pragma kernel RenderPosition
+#pragma kernel Normalize
+#define numThread 32
+#define distanceExpansion 1e8
+
+#include "Util.cginc"
+
+RWStructuredBuffer<int> pixels;
+StructuredBuffer<float2> seeds;
+int numSeeds;
+int expandedResolution;
+int offset;
+int step;
+float4 channelMask;
+
+RWStructuredBuffer<int> minMax;
+RWTexture2D<float4> Result;
+bool invert;
+
+[numthreads(numThread, numThread, 1)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+	pixels[id.x + id.y * expandedResolution] = -1;
+}
+
+[numthreads(512, 1, 1)]
+void InitSeeds(uint3 id : SV_DispatchThreadID)
+{
+	if ((int)id.x < numSeeds)
+	{
+		int2 index = (int2)(seeds[id.x] * expandedResolution);
+		for (int i = 0; i < 9; i++)
+		{
+			int2 offIndex = index + offset2d[i];
+			if (IsIndexInRange2D(offIndex, expandedResolution))
+			{
+				int expandIndex = offIndex.x + offIndex.y * expandedResolution;
+				pixels[expandIndex] = id.x;
+			}
+		}
+	}
+}
+
+[numthreads(numThread, numThread, 1)]
+void JFA(uint3 id : SV_DispatchThreadID)
+{
+	float min_dist = 1e10;
+	int min_index = -1;
+	// ! Without this, out-range indices will write the pixel at clamped position
+	if (IsIndexInRange2D(id.xy, expandedResolution))
+	{
+		for (int i = 0; i < 9; i++)
+		{
+			int2 idx = id.xy + offset2d[i] * step;
+			if (IsIndexInRange2D(idx, expandedResolution))
+			{
+				int idx1d = idx.x + idx.y * expandedResolution;
+				if (pixels[idx1d] != -1)
+				{
+					float dist = distance(id.xy / (float)expandedResolution, seeds[pixels[idx1d]]);
+					if (dist < min_dist)
+					{
+						min_dist = dist;
+						min_index = pixels[idx1d];
+					}
+				}
+			}
+		}
+		pixels[id.x + id.y * expandedResolution] = min_index;
+	}
+}
+
+[numthreads(numThread, numThread, 1)]
+void RenderDistance(uint3 id : SV_DispatchThreadID)
+{
+	int pixelIndex;
+	int2 realID = id.xy + int2(offset, offset);
+	pixelIndex = realID.x + realID.y * expandedResolution;
+
+	if (pixels[pixelIndex] != -1)
+	{
+		float dist = distance(realID.xy / (float)expandedResolution, seeds[pixels[pixelIndex]]);
+		Result[id.xy] = Result[id.xy] * (1 - channelMask) + channelMask * dist;
+
+		int expandedDist = (int)(dist * distanceExpansion);
+		InterlockedMin(minMax[0], expandedDist);
+		InterlockedMax(minMax[1], expandedDist);
+	}
+	else
+	{
+		Result[id.xy] = float4(0.0, 0.864, 1.0, 1.0);
+	}
+}
+
+[numthreads(numThread, numThread, 1)]
+void RenderPosition(uint3 id : SV_DispatchThreadID)
+{
+	int pixelIndex;
+	int2 realID = id.xy + int2(offset, offset);
+	pixelIndex = realID.x + realID.y * expandedResolution;
+
+	if (pixels[pixelIndex] != -1)
+	{
+		float index = pixels[pixelIndex];
+		Result[id.xy] = float4(seeds[index].x, seeds[index].y, 0.0, 1.0);
+	}
+	else
+	{
+		Result[id.xy] = float4(0.0, 0.864, 1, 0.6);
+	}
+}
+
+[numthreads(numThread, numThread, 1)]
+void Normalize(uint3 id : SV_DispatchThreadID)
+{
+	float minDist = (float)minMax[0] / distanceExpansion;
+	float maxDist = (float)minMax[1] / distanceExpansion;
+	float4 normalizedDist = (Result[id.xy] - minDist) / (maxDist - minDist);
+
+	normalizedDist = invert ? 1 - normalizedDist : normalizedDist;
+
+	Result[id.xy] = Result[id.xy] * (1 - channelMask) + channelMask * normalizedDist;
+}

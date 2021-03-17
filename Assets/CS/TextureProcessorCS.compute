@@ -1,0 +1,17 @@
+﻿#pragma kernel Export2DSlice
+#define numThread 32
+
+RWTexture3D<float4> Tex3D;
+RWTexture2D<float4> Slice;
+int layer;
+int resolution;
+
+[numthreads(numThread, numThread, 1)]
+void Export2DSlice(uint3 id : SV_DispatchThreadID)
+{
+	if ((int)id.x >= 0 && (int)id.x < resolution && (int)id.y >= 0 && (int)id.y < resolution)
+	{
+		uint3 index = uint3(id.x, id.y, layer);
+		Slice[id.xy] = Tex3D[index];
+	}
+}

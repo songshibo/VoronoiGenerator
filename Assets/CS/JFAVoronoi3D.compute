@@ -1,0 +1,119 @@
+﻿#pragma kernel Clear
+#pragma kernel InitSeeds
+#pragma kernel JFA
+#pragma kernel RenderDistance
+#pragma kernel Normalize
+#pragma kernel Export2DSlice
+#define numThread 8
+#define distanceExpansion 1e8
+
+#include "Util.cginc"
+
+RWStructuredBuffer<int> pixels;
+StructuredBuffer<float3> seeds;
+int expandedResolution;
+int numSeeds;
+int step;
+int channel;
+
+RWTexture3D<float4> Result;
+RWStructuredBuffer<int> minMax;
+bool invert;
+int offset;
+
+[numthreads(numThread,numThread,numThread)]
+void Clear (uint3 id : SV_DispatchThreadID)
+{
+    pixels[id.x + (id.y + id.z * expandedResolution) * expandedResolution] = -1;
+}
+
+[numthreads(512,1,1)]
+void InitSeeds (uint3 id : SV_DispatchThreadID)
+{
+    if((int)id.x < numSeeds)
+    {
+        int3 index = (int3)(seeds[id.x] * expandedResolution);
+        for(int i = 0; i < 27; i++)
+        {
+            int3 offIndex = index + offset3d[i];
+            if(IsIndexInRange3D(offIndex, expandedResolution))
+            {
+                int idx1d = offIndex.x + (offIndex.y + offIndex.z * expandedResolution) * expandedResolution;
+                pixels[idx1d] = id.x; 
+            }
+        }
+    }
+}
+
+[numthreads(numThread,numThread,numThread)]
+void JFA (uint3 id : SV_DispatchThreadID)
+{
+    float min_dist = 1e10;
+    int min_index = -1;
+    if(IsIndexInRange3D(id, expandedResolution))
+    {
+        for(int i = 0; i < 27; i++)
+        {
+            int3 idx = id + offset3d[i] * step;
+            if(IsIndexInRange3D(idx, expandedResolution))
+            {
+                int idx1d = idx.x + (idx.y + idx.z * expandedResolution) * expandedResolution ;
+                if(pixels[idx1d] != -1)
+                {
+                    float dist = distance(id / (float)expandedResolution, seeds[pixels[idx1d]]);
+                    if(dist < min_dist)
+                    {
+                        min_dist = dist;
+                        min_index = pixels[idx1d];
+                    }
+                }
+            }
+        }
+        pixels[id.x + (id.y + id.z * expandedResolution) * expandedResolution] = min_index;
+    }
+}
+
+[numthreads(numThread,numThread,numThread)]
+void RenderDistance (uint3 id : SV_DispatchThreadID)
+{
+    int pixelIndex;
+    int3 realID = id + int3(offset, offset, offset);
+    pixelIndex = realID.x + (realID.y + realID.z * expandedResolution) * expandedResolution;
+
+    if(pixels[pixelIndex] != -1)
+    {
+        float dist = distance(realID / (float)expandedResolution, seeds[pixels[pixelIndex]]);
+        Result[id] = SetChannel(channel, dist, float4(0.0, 0.0, 0.0, 0.0));
+
+        int expandedDist = (int)(dist * distanceExpansion);
+        InterlockedMin(minMax[0], expandedDist);
+        InterlockedMax(minMax[1], expandedDist);
+    }
+    else
+    {
+        Result[id] = float4(0.0, 0.864, 1.0, 1.0);
+    }
+}
+
+[numthreads(numThread,numThread,numThread)]
+void Normalize (uint3 id : SV_DispatchThreadID)
+{
+    float minDist = (float)minMax[0] / distanceExpansion;
+    float maxDist = (float)minMax[1] / distanceExpansion;
+    float normalizedDist = (GetChannel(channel, Result[id]) - minDist) / (maxDist - minDist);
+
+    normalizedDist = invert ? 1 - normalizedDist : normalizedDist;
+
+    Result[id] = SetChannel(channel, normalizedDist, float4(0.0, 0.0, 0.0, 1.0));
+}
+
+/// Export 3D Texture into 2D Texture Array
+RWTexture2D<float4> slice;
+int layer;
+
+[numthreads(32, 32, 1)]
+void Export2DSlice(uint3 id : SV_DispatchThreadID)
+{
+    uint3 index = uint3(id.x, id.y, layer);
+    slice[id.xy] = Result[index];
+}
